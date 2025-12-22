@@ -896,7 +896,9 @@ pub mod wmf {
 
             match control_id {
                 MFControlId::ProcAmpBoolean(id) | MFControlId::ProcAmpRange(id) => unsafe {
-                    if let Err(why) = video_proc_amp.Set(id, ctrl_value, flag.0) {
+                    if let Err(why) =
+                        video_proc_amp.Set(id, ctrl_value, CameraControl_Flags_Manual.0)
+                    {
                         return Err(NokhwaError::SetPropertyError {
                             property: control.to_string(),
                             value: ctrl_value.to_string(),
@@ -905,7 +907,9 @@ pub mod wmf {
                     }
                 },
                 MFControlId::CCValue(id) | MFControlId::CCRange(id) => unsafe {
-                    if let Err(why) = camera_control.Set(id, ctrl_value, flag.0) {
+                    if let Err(why) =
+                        camera_control.Set(id, ctrl_value, CameraControl_Flags_Manual.0)
+                    {
                         return Err(NokhwaError::SetPropertyError {
                             property: control.to_string(),
                             value: ctrl_value.to_string(),
