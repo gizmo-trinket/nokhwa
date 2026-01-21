@@ -390,7 +390,7 @@ pub mod wmf {
             KnownCameraControl::Pan => MFControlId::CCRange(CameraControl_Pan.0),
             KnownCameraControl::Tilt => MFControlId::CCRange(CameraControl_Tilt.0),
             KnownCameraControl::Zoom => MFControlId::CCRange(CameraControl_Zoom.0),
-            KnownCameraControl::Exposure => MFControlId::CCValue(CameraControl_Exposure.0),
+            KnownCameraControl::Exposure => MFControlId::CCRange(CameraControl_Exposure.0),
             KnownCameraControl::Iris => MFControlId::CCValue(CameraControl_Iris.0),
             KnownCameraControl::Focus => MFControlId::CCValue(CameraControl_Focus.0),
             KnownCameraControl::Other(o) => {
@@ -878,21 +878,6 @@ pub mod wmf {
                     })
                 }
             };
-
-            let flag = current_value
-                .flag()
-                .get(0)
-                .map(|x| {
-                    if *x == KnownCameraControlFlag::Automatic {
-                        CameraControl_Flags_Auto
-                    } else {
-                        CameraControl_Flags_Manual
-                    }
-                })
-                .ok_or(NokhwaError::StructureError {
-                    structure: "KnownCameraControlFlag".to_string(),
-                    error: "could not cast to i32".to_string(),
-                })?;
 
             match control_id {
                 MFControlId::ProcAmpBoolean(id) | MFControlId::ProcAmpRange(id) => unsafe {
