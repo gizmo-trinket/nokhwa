@@ -723,7 +723,7 @@ mod internal {
                 .into_iter()
                 .map(|desc| {
                     let id_as_kcc = id_to_known_camera_control(desc.id);
-                    let ctrl_current = device.control(desc.id)?.value;
+                    let ctrl_current = device.control(&desc)?.value;
 
                     let ctrl_value_desc = match (desc.typ, ctrl_current) {
                         (
