@@ -391,8 +391,8 @@ pub mod wmf {
             KnownCameraControl::Tilt => MFControlId::CCRange(CameraControl_Tilt.0),
             KnownCameraControl::Zoom => MFControlId::CCRange(CameraControl_Zoom.0),
             KnownCameraControl::Exposure => MFControlId::CCRange(CameraControl_Exposure.0),
-            KnownCameraControl::Iris => MFControlId::CCValue(CameraControl_Iris.0),
-            KnownCameraControl::Focus => MFControlId::CCValue(CameraControl_Focus.0),
+            KnownCameraControl::Iris => MFControlId::CCRange(CameraControl_Iris.0),
+            KnownCameraControl::Focus => MFControlId::CCRange(CameraControl_Focus.0),
             KnownCameraControl::Other(o) => {
                 if o == VideoProcAmp_ColorEnable.0 as u128 {
                     MFControlId::ProcAmpRange(o as i32)
