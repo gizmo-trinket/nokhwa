@@ -27,6 +27,11 @@
 extern crate objc;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
+mod frame;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub use frame::DeliveredFrame;
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod internal {
 
     #[allow(non_snake_case)]
@@ -197,15 +202,16 @@ mod internal {
         }
     }
 
-    use crate::core_media::{
-        dispatch_queue_create, AVCaptureExposureDurationCurrent,
-        AVCaptureExposureTargetBiasCurrent, AVCaptureISOCurrent, AVCaptureWhiteBalanceGains,
-        AVMediaTypeAudio, AVMediaTypeClosedCaption, AVMediaTypeDepthData, AVMediaTypeMetadata,
-        AVMediaTypeMetadataObject, AVMediaTypeMuxed, AVMediaTypeSubtitle, AVMediaTypeText,
-        AVMediaTypeTimecode, AVMediaTypeVideo, CGPoint, CMSampleBufferGetImageBuffer,
-        CMVideoFormatDescriptionGetDimensions, CVImageBufferRef, CVPixelBufferGetBaseAddress,
-        CVPixelBufferGetDataSize, CVPixelBufferLockBaseAddress, CVPixelBufferUnlockBaseAddress,
-        NSObject, OSType,
+    use crate::{
+        core_media::{
+            dispatch_queue_create, AVCaptureExposureDurationCurrent,
+            AVCaptureExposureTargetBiasCurrent, AVCaptureISOCurrent, AVCaptureWhiteBalanceGains,
+            AVMediaTypeAudio, AVMediaTypeClosedCaption, AVMediaTypeDepthData, AVMediaTypeMetadata,
+            AVMediaTypeMetadataObject, AVMediaTypeMuxed, AVMediaTypeSubtitle, AVMediaTypeText,
+            AVMediaTypeTimecode, AVMediaTypeVideo, CGPoint, CMVideoFormatDescriptionGetDimensions,
+            NSObject, OSType,
+        },
+        DeliveredFrame,
     };
 
     use block::ConcreteBlock;
@@ -215,13 +221,12 @@ mod internal {
     };
     use core_media_sys::{
         kCMPixelFormat_24RGB, kCMPixelFormat_422YpCbCr8_yuvs,
-        kCMPixelFormat_8IndexedGray_WhiteIsZero, kCMVideoCodecType_422YpCbCr8,
-        kCMVideoCodecType_JPEG, kCMVideoCodecType_JPEG_OpenDML, CMFormatDescriptionGetMediaSubType,
-        CMFormatDescriptionRef, CMSampleBufferRef, CMTime, CMVideoDimensions,
+        kCMPixelFormat_8IndexedGray_WhiteIsZero, kCMVideoCodecType_JPEG,
+        kCMVideoCodecType_JPEG_OpenDML, CMFormatDescriptionGetMediaSubType, CMFormatDescriptionRef,
+        CMSampleBufferRef, CMTime, CMVideoDimensions,
     };
     use core_video_sys::{
-        kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
     };
     use flume::{Receiver, Sender};
@@ -245,7 +250,6 @@ mod internal {
         cmp::Ordering,
         collections::BTreeMap,
         convert::TryFrom,
-        error::Error,
         ffi::{c_float, c_void, CStr},
         sync::Arc,
     };
@@ -340,21 +344,6 @@ mod internal {
         out_vec
     }
 
-    fn try_ns_arr_to_vec<T, TE>(data: *mut Object) -> Result<Vec<T>, TE>
-    where
-        TE: Error,
-        T: TryFrom<*mut Object, Error = TE>,
-    {
-        let length = unsafe { NSArray::count(data) };
-
-        let mut out_vec: Vec<T> = Vec::with_capacity(length as usize);
-        for index in 0..length {
-            let item = unsafe { NSArray::objectAtIndex(data, index) };
-            out_vec.push(T::try_from(item)?);
-        }
-        Ok(out_vec)
-    }
-
     fn compare_ns_string(this: *mut Object, other: core_media::NSString) -> bool {
         unsafe {
             let equal: BOOL = msg_send![this, isEqualToString: other];
@@ -365,16 +354,42 @@ mod internal {
     #[allow(non_upper_case_globals)]
     fn raw_fcc_to_frameformat(raw: OSType) -> Option<FrameFormat> {
         match raw {
-            kCMVideoCodecType_422YpCbCr8 | kCMPixelFormat_422YpCbCr8_yuvs => {
-                Some(FrameFormat::YUYV)
-            }
+            kCMPixelFormat_422YpCbCr8_yuvs => Some(FrameFormat::YUYV),
             kCMVideoCodecType_JPEG | kCMVideoCodecType_JPEG_OpenDML => Some(FrameFormat::MJPEG),
             kCMPixelFormat_8IndexedGray_WhiteIsZero => Some(FrameFormat::GRAY),
-            kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-            | kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-            | kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => Some(FrameFormat::YUYV),
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            | kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => Some(FrameFormat::NV12),
             kCMPixelFormat_24RGB => Some(FrameFormat::RAWRGB),
             _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    mod format_tests {
+        use super::*;
+        #[test]
+        fn native_subtypes_do_not_confuse_nv12_uyvy_or_ten_bit() {
+            use core_video_sys::{
+                kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, kCVPixelFormatType_422YpCbCr8,
+            };
+            assert_eq!(
+                raw_fcc_to_frameformat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+                Some(FrameFormat::NV12)
+            );
+            assert_eq!(
+                raw_fcc_to_frameformat(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
+                Some(FrameFormat::NV12)
+            );
+            assert_eq!(
+                raw_fcc_to_frameformat(kCMPixelFormat_422YpCbCr8_yuvs),
+                Some(FrameFormat::YUYV)
+            );
+            // 2vuy is UYVY, not YUYV.
+            assert_eq!(raw_fcc_to_frameformat(kCVPixelFormatType_422YpCbCr8), None);
+            assert_eq!(
+                raw_fcc_to_frameformat(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange),
+                None
+            );
         }
     }
 
@@ -402,8 +417,21 @@ mod internal {
                 }
             }
 
+            extern "C" fn callback_dealloc(this: &mut Object, _: Sel) {
+                unsafe {
+                    let ptr = *this.get_ivar::<*const c_void>("_arcmutptr");
+                    if !ptr.is_null() {
+                        this.set_ivar("_arcmutptr", std::ptr::null::<c_void>());
+                        drop(Arc::from_raw(
+                            ptr.cast::<Sender<Result<DeliveredFrame, NokhwaError>>>(),
+                        ));
+                    }
+                    let _: () = msg_send![super(this, class!(NSObject)), dealloc];
+                }
+            }
+
             // Delegate compliance method
-            // SAFETY: This assumes that the buffer byte size is a u8. Any other size will cause unsafety.
+            // Pixel formats, plane layouts, and pointer lifetimes are checked by frame::read.
             #[allow(non_snake_case)]
             #[allow(non_upper_case_globals)]
             extern "C" fn capture_out_callback(
@@ -413,33 +441,31 @@ mod internal {
                 didOutputSampleBuffer: CMSampleBufferRef,
                 _: *mut Object,
             ) {
-                let image_buffer: CVImageBufferRef =
-                    unsafe { CMSampleBufferGetImageBuffer(didOutputSampleBuffer) };
-                unsafe {
-                    CVPixelBufferLockBaseAddress(image_buffer, 0);
-                };
-
-                let buffer_length = unsafe { CVPixelBufferGetDataSize(image_buffer) };
-                let buffer_ptr = unsafe { CVPixelBufferGetBaseAddress(image_buffer) };
-                let buffer_as_vec = unsafe {
-                    std::slice::from_raw_parts_mut(buffer_ptr as *mut u8, buffer_length as usize)
-                        .to_vec()
-                };
-
-                unsafe { CVPixelBufferUnlockBaseAddress(image_buffer, 0) };
-                // oooooh scarey unsafe
-                // AAAAAAAAAAAAAAAAAAAAAAAAA
-                // https://c.tenor.com/0e_zWtFLOzQAAAAC/needy-streamer-overload-needy-girl-overdose.gif
-                let bufferlck_cv: *const c_void = unsafe { msg_send![this, bufferPtr] };
-                let buffer_sndr = unsafe {
-                    let ptr = bufferlck_cv.cast::<Sender<(Vec<u8>, FrameFormat)>>();
-                    Arc::from_raw(ptr)
-                };
-                if let Err(_) = buffer_sndr.send((buffer_as_vec, FrameFormat::GRAY)) {
-                    // FIXME: dont, what the fuck???
+                // The delegate owns one sender reference until deallocation. Never drop an Arc per frame.
+                let ptr = unsafe { *this.get_ivar::<*const c_void>("_arcmutptr") }
+                    .cast::<Sender<Result<DeliveredFrame, NokhwaError>>>();
+                if ptr.is_null() {
                     return;
                 }
-                std::mem::forget(buffer_sndr);
+
+                let sender = unsafe { &*ptr };
+                if sender.is_full() || sender.is_disconnected() {
+                    return;
+                }
+
+                let result = std::panic::catch_unwind(|| unsafe {
+                    crate::frame::read(didOutputSampleBuffer)
+                })
+                .unwrap_or_else(|_| {
+                    Err(NokhwaError::ProcessFrameError {
+                        src: FrameFormat::NV12,
+                        destination: "RGB8".to_string(),
+                        error: "AVFoundation frame conversion panicked; frame discarded"
+                            .to_string(),
+                    })
+                });
+
+                let _ = sender.try_send(result);
             }
 
             #[allow(non_snake_case)]
@@ -453,6 +479,10 @@ mod internal {
             }
 
             unsafe {
+                decl.add_method(
+                    sel!(dealloc),
+                    callback_dealloc as extern "C" fn(&mut Object, Sel),
+                );
                 decl.add_method(
                     sel!(bufferPtr),
                     my_callback_get_arcmutptr as extern "C" fn(&Object, Sel) -> *const c_void,
@@ -681,13 +711,19 @@ mod internal {
     impl AVCaptureVideoCallback {
         pub fn new(
             device_spec: &CStr,
-            buffer: &Arc<Sender<(Vec<u8>, FrameFormat)>>,
+            buffer: &Arc<Sender<Result<DeliveredFrame, NokhwaError>>>,
         ) -> Result<Self, NokhwaError> {
             let cls = &CALLBACK_CLASS as &Class;
             let delegate: *mut Object = unsafe { msg_send![cls, alloc] };
             let delegate: *mut Object = unsafe { msg_send![delegate, init] };
+            if delegate.is_null() {
+                return Err(NokhwaError::InitializeError {
+                    backend: ApiBackend::AVFoundation,
+                    error: "Could not allocate AVFoundation callback delegate".to_string(),
+                });
+            }
             let buffer_as_ptr = {
-                let arc_raw = Arc::as_ptr(buffer);
+                let arc_raw = Arc::into_raw(Arc::clone(buffer));
                 arc_raw.cast::<c_void>()
             };
             unsafe {
@@ -698,6 +734,15 @@ mod internal {
                 dispatch_queue_create(device_spec.as_ptr(), NSObject(std::ptr::null_mut()))
             };
 
+            if queue.0.is_null() {
+                unsafe {
+                    let _: () = msg_send![delegate, release];
+                }
+                return Err(NokhwaError::InitializeError {
+                    backend: ApiBackend::AVFoundation,
+                    error: "Could not allocate AVFoundation callback queue".to_string(),
+                });
+            }
             Ok(AVCaptureVideoCallback { delegate, queue })
         }
 
@@ -711,6 +756,16 @@ mod internal {
 
         pub fn queue(&self) -> &NSObject {
             &self.queue
+        }
+    }
+
+    impl Drop for AVCaptureVideoCallback {
+        fn drop(&mut self) {
+            // Attached outputs retain both objects independently and drain their queue before releasing them.
+            unsafe {
+                let _: () = msg_send![self.delegate, release];
+                core_media::dispatch_release(self.queue.clone());
+            }
         }
     }
 
@@ -837,7 +892,7 @@ mod internal {
     pub struct AVCaptureDevice {
         inner: *mut Object,
         device: CameraInfo,
-        locked: bool,
+        locked: std::cell::Cell<bool>,
     }
 
     impl AVCaptureDevice {
@@ -886,7 +941,7 @@ mod internal {
             Ok(AVCaptureDevice {
                 inner: capture,
                 device: camera_info,
-                locked: false,
+                locked: std::cell::Cell::new(false),
             })
         }
 
@@ -895,9 +950,19 @@ mod internal {
         }
 
         pub fn supported_formats_raw(&self) -> Result<Vec<AVCaptureDeviceFormat>, NokhwaError> {
-            try_ns_arr_to_vec::<AVCaptureDeviceFormat, NokhwaError>(unsafe {
-                msg_send![self.inner, formats]
-            })
+            let array: *mut Object = unsafe { msg_send![self.inner, formats] };
+            let count = unsafe { NSArray::count(array) };
+            let mut formats = Vec::new();
+            for index in 0..count {
+                let raw = unsafe { NSArray::objectAtIndex(array, index) };
+                let desc: CMFormatDescriptionRef = unsafe { msg_send![raw, formatDescription] };
+                let fcc = unsafe { CMFormatDescriptionGetMediaSubType(desc) };
+                // UYVY and ten-bit NV12 cannot be represented by FrameFormat.
+                if raw_fcc_to_frameformat(fcc).is_some() {
+                    formats.push(AVCaptureDeviceFormat::try_from(raw)?);
+                }
+            }
+            Ok(formats)
         }
 
         pub fn supported_formats(&self) -> Result<Vec<CameraFormat>, NokhwaError> {
@@ -933,7 +998,7 @@ mod internal {
         }
 
         pub fn lock(&self) -> Result<(), NokhwaError> {
-            if self.locked {
+            if self.locked.get() {
                 return Ok(());
             }
             if self.already_in_use() {
@@ -952,35 +1017,35 @@ mod internal {
                 });
             }
             // Space these out for debug purposes
-            if !accepted == YES {
+            if accepted != YES {
                 return Err(NokhwaError::SetPropertyError {
                     property: "lockForConfiguration".to_string(),
                     value: "Locked".to_string(),
                     error: "Lock Rejected".to_string(),
                 });
             }
+            self.locked.set(true);
             Ok(())
         }
 
         pub fn unlock(&mut self) {
-            if self.locked {
-                self.locked = false;
+            if self.locked.replace(false) {
                 unsafe { msg_send![self.inner, unlockForConfiguration] }
             }
         }
 
         // thank you ffmpeg
         pub fn set_all(&mut self, descriptor: CameraFormat) -> Result<(), NokhwaError> {
-            self.lock()?;
-            let format_list = try_ns_arr_to_vec::<AVCaptureDeviceFormat, NokhwaError>(unsafe {
-                msg_send![self.inner, formats]
-            })?;
+            let format_list = self.supported_formats_raw()?;
             let format_description_sel = sel!(formatDescription);
 
             let mut selected_format: *mut Object = std::ptr::null_mut();
             let mut selected_range: *mut Object = std::ptr::null_mut();
 
             for format in format_list {
+                if format.fourcc != descriptor.format() {
+                    continue;
+                }
                 let format_desc_ref: CMFormatDescriptionRef =
                     unsafe { msg_send![format.internal, performSelector: format_description_sel] };
                 let dimensions = unsafe { CMVideoFormatDescriptionGetDimensions(format_desc_ref) };
@@ -988,14 +1053,13 @@ mod internal {
                 if dimensions.height == descriptor.resolution().height() as i32
                     && dimensions.width == descriptor.resolution().width() as i32
                 {
-                    selected_format = format.internal;
-
                     for range in ns_arr_to_vec::<AVFrameRateRange>(unsafe {
                         msg_send![format.internal, videoSupportedFrameRateRanges]
                     }) {
                         let max_fps: f64 = unsafe { msg_send![range.inner, maxFrameRate] };
                         // Older Apple cameras (i.e. iMac 2013) return 29.97000002997 as FPS.
                         if (f64::from(descriptor.frame_rate()) - max_fps).abs() < 0.999 {
+                            selected_format = format.internal;
                             selected_range = range.inner;
                             break;
                         }
@@ -1010,6 +1074,8 @@ mod internal {
                 });
             }
 
+            // Do not hold the configuration lock while validating an unsupported request.
+            self.lock()?;
             let activefmtkey = str_to_nsstr("activeFormat");
             let min_frame_duration = str_to_nsstr("minFrameDuration");
             let active_video_min_frame_duration = str_to_nsstr("activeVideoMinFrameDuration");
@@ -2258,6 +2324,9 @@ mod internal {
 
     pub struct AVCaptureVideoDataOutput {
         inner: *mut Object,
+        // AVFoundation does not retain its delegate. Keep a separate reference until
+        // detachment and all already-enqueued callbacks have completed.
+        callback: std::cell::Cell<Option<(*mut Object, *mut Object)>>,
     }
 
     impl AVCaptureVideoDataOutput {
@@ -2265,8 +2334,43 @@ mod internal {
             AVCaptureVideoDataOutput::default()
         }
 
-        pub fn add_delegate(&self, delegate: &AVCaptureVideoCallback) -> Result<(), NokhwaError> {
+        /// Detach and drain pending callbacks. Call from the owning capture thread,
+        /// never from this output's serial delegate queue.
+        pub fn remove_delegate(&self) {
+            extern "C" fn drained(_: *mut c_void) {}
+            extern "C" {
+                fn dispatch_sync_f(
+                    queue: *mut Object,
+                    context: *mut c_void,
+                    work: extern "C" fn(*mut c_void),
+                );
+            }
             unsafe {
+                let _: () = msg_send![self.inner, setSampleBufferDelegate: nil queue: nil];
+                if let Some((delegate, queue)) = self.callback.take() {
+                    dispatch_sync_f(queue, std::ptr::null_mut(), drained);
+                    let _: () = msg_send![delegate, release];
+                    core_media::dispatch_release(NSObject(queue));
+                }
+            }
+        }
+
+        pub fn add_delegate(&self, delegate: &AVCaptureVideoCallback) -> Result<(), NokhwaError> {
+            if self.inner.is_null() {
+                return Err(NokhwaError::InitializeError {
+                    backend: ApiBackend::AVFoundation,
+                    error: "Could not allocate AVCaptureVideoDataOutput".to_string(),
+                });
+            }
+            self.remove_delegate();
+            extern "C" {
+                fn dispatch_retain(queue: *mut Object);
+            }
+            unsafe {
+                let _: *mut Object = msg_send![delegate.delegate, retain];
+                dispatch_retain(delegate.queue.0);
+                self.callback
+                    .set(Some((delegate.delegate, delegate.queue.0)));
                 let _: () = msg_send![
                     self.inner,
                     setSampleBufferDelegate: delegate.delegate
@@ -2281,8 +2385,8 @@ mod internal {
                 FrameFormat::YUYV => kCMPixelFormat_422YpCbCr8_yuvs,
                 FrameFormat::MJPEG => kCMVideoCodecType_JPEG,
                 FrameFormat::GRAY => kCMPixelFormat_8IndexedGray_WhiteIsZero,
-                FrameFormat::NV12 => kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-                FrameFormat::RAWRGB => kCMPixelFormat_24RGB,
+                // AVFoundation converts any source mode to BGRA (honouring the source's declared YCbCr matrix and range); frame::read packs it to RGB8.
+                FrameFormat::NV12 | FrameFormat::RAWRGB => kCVPixelFormatType_32BGRA,
                 FrameFormat::RAWBGR => {
                     return Err(NokhwaError::SetPropertyError {
                         property: "setVideoSettings".to_string(),
@@ -2296,6 +2400,7 @@ mod internal {
             let key = unsafe { kCVPixelBufferPixelFormatTypeKey } as *mut Object;
             let dict = unsafe { NSDictionary::dictionaryWithObject_forKey_(nil, obj, key) };
             let _: () = unsafe { msg_send![self.inner, setVideoSettings:dict] };
+            let _: () = unsafe { msg_send![self.inner, setAlwaysDiscardsLateVideoFrames:YES] };
             Ok(())
         }
     }
@@ -2304,12 +2409,25 @@ mod internal {
     use core_foundation::base::TCFType;
     use core_foundation::number::CFNumber;
     use core_video_sys::kCVPixelBufferPixelFormatTypeKey;
+
+    impl Drop for AVCaptureVideoDataOutput {
+        fn drop(&mut self) {
+            self.remove_delegate();
+            unsafe {
+                let _: () = msg_send![self.inner, release];
+            }
+        }
+    }
+
     impl Default for AVCaptureVideoDataOutput {
         fn default() -> Self {
             let cls = class!(AVCaptureVideoDataOutput);
             let inner: *mut Object = unsafe { msg_send![cls, new] };
 
-            AVCaptureVideoDataOutput { inner }
+            AVCaptureVideoDataOutput {
+                inner,
+                callback: std::cell::Cell::new(None),
+            }
         }
     }
 

@@ -18,7 +18,7 @@ use flume::{Receiver, Sender};
 #[cfg(target_os = "macos")]
 use nokhwa_bindings_macos::{
     AVCaptureDevice, AVCaptureDeviceInput, AVCaptureSession, AVCaptureVideoCallback,
-    AVCaptureVideoDataOutput,
+    AVCaptureVideoDataOutput, DeliveredFrame,
 };
 use nokhwa_core::{
     buffer::Buffer,
@@ -35,6 +35,10 @@ use nokhwa_core::{pixel_format::RgbFormat, types::RequestedFormatType};
 use std::{ffi::CString, sync::Arc};
 
 use std::{borrow::Cow, collections::HashMap};
+
+/// Longest `frame()`/`frame_raw()` wait before reporting a stalled or never-started stream.
+#[cfg(target_os = "macos")]
+const FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The backend struct that interfaces with V4L2.
 /// To see what this does, please see [`CaptureBackendTrait`].
@@ -55,8 +59,8 @@ pub struct AVFoundationCaptureDevice {
     info: CameraInfo,
     buffer_name: CString,
     format: CameraFormat,
-    frame_buffer_receiver: Arc<Receiver<(Vec<u8>, FrameFormat)>>,
-    fbufsnd: Arc<Sender<(Vec<u8>, FrameFormat)>>,
+    frame_buffer_receiver: Arc<Receiver<Result<DeliveredFrame, NokhwaError>>>,
+    fbufsnd: Arc<Sender<Result<DeliveredFrame, NokhwaError>>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -85,7 +89,7 @@ impl AVFoundationCaptureDevice {
                 }
             })?;
 
-        let (send, recv) = flume::unbounded();
+        let (send, recv) = flume::bounded(1);
         Ok(AVFoundationCaptureDevice {
             device,
             dev_input: None,
@@ -98,6 +102,19 @@ impl AVFoundationCaptureDevice {
             frame_buffer_receiver: Arc::new(recv),
             fbufsnd: Arc::new(send),
         })
+    }
+
+    fn receive_frame(&self) -> Result<DeliveredFrame, NokhwaError> {
+        if !self.is_stream_open() {
+            return Err(NokhwaError::ReadFrameError(
+                "AVFoundation stream is not open".to_string(),
+            ));
+        }
+        self.frame_buffer_receiver
+            .recv_timeout(FRAME_TIMEOUT)
+            .map_err(|why| NokhwaError::ReadFrameError(format!(
+                "AVFoundation received no frame within {FRAME_TIMEOUT:?} or callback disconnected ({why}); check camera permission, connection, and selected format"
+            )))?
     }
 
     /// Creates a new capture device using the `AVFoundation` backend with desired settings.
@@ -141,8 +158,15 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
     }
 
     fn set_camera_format(&mut self, new_fmt: CameraFormat) -> Result<(), NokhwaError> {
+        let was_open = self.is_stream_open();
+        if was_open {
+            self.stop_stream()?;
+        }
         self.device.set_all(new_fmt)?;
         self.format = new_fmt;
+        if was_open {
+            self.open_stream()?;
+        }
         Ok(())
     }
 
@@ -156,7 +180,7 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
             .device
             .supported_formats()?
             .into_iter()
-            .filter(|x| x.format() != fourcc);
+            .filter(|x| x.format() == fourcc);
         let mut res_list = HashMap::new();
         for format in supported_cfmt {
             match res_list.get_mut(&format.resolution()) {
@@ -240,7 +264,11 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
     }
 
     fn open_stream(&mut self) -> Result<(), NokhwaError> {
+        if self.is_stream_open() {
+            return Ok(());
+        }
         self.refresh_camera_format()?;
+        self.frame_buffer_receiver.drain().for_each(drop);
 
         let input = AVCaptureDeviceInput::new(&self.device)?;
         let session = AVCaptureSession::new();
@@ -280,20 +308,13 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
     }
 
     fn frame(&mut self) -> Result<Buffer, NokhwaError> {
-        self.refresh_camera_format()?;
-        let cfmt = self.camera_format();
-        let b = self.frame_raw()?;
-        let buffer = Buffer::new(cfmt.resolution(), b.as_ref(), cfmt.format());
-        let _ = self.frame_buffer_receiver.drain();
-        Ok(buffer)
+        let frame = self.receive_frame()?;
+        Ok(Buffer::new(frame.resolution, &frame.data, frame.format))
     }
 
     fn frame_raw(&mut self) -> Result<Cow<'_, [u8]>, NokhwaError> {
-        let result = match self.frame_buffer_receiver.recv() {
-            Ok(recv) => Ok(Cow::from(recv.0)),
-            Err(why) => Err(NokhwaError::ReadFrameError(why.to_string())),
-        };
-        result
+        let frame = self.receive_frame()?;
+        Ok(Cow::Owned(frame.data))
     }
 
     fn stop_stream(&mut self) -> Result<(), NokhwaError> {
@@ -331,11 +352,12 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
             }
         };
 
+        output.remove_delegate();
         session.remove_output(output);
         session.remove_input(input);
         session.stop();
 
-        self.frame_buffer_receiver.try_iter();
+        self.frame_buffer_receiver.drain().for_each(drop);
         self.dev_input = None;
         self.session = None;
         self.data_collect = None;
